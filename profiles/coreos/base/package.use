@@ -150,3 +150,6 @@ sys-auth/polkit -introspection
 
 # enables ELF support to e.g. allow tc to handle BPF filters.
 sys-apps/iproute2 elf
+# Enable kerberos support for NFS
+net-fs/nfs-utils kerberos nfsv41 nfsv4 junction ldap libmount nfsdcld uuid
+net-libs/libtirpc kerberos
