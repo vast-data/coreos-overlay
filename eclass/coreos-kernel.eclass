@@ -111,16 +111,20 @@ kernel_target() {
 	echo "${path##*/}"
 }
 
-kmake() {
+kernel-cflags-for-kmake() {
 	local kernel_arch=$(tc-arch-kernel) kernel_cflags=
 	if gcc-specs-pie; then
 		kernel_cflags="-nopie -fstack-check=no"
 	fi
+	echo ${kernel_cflags}
+}
+
+kmake() {
 	emake "--directory=${S}/source" \
-		ARCH="${kernel_arch}" \
+		ARCH="$(tc-arch-kernel)" \
 		CROSS_COMPILE="${CHOST}-" \
 		KBUILD_OUTPUT="../build" \
-		KCFLAGS="${kernel_cflags}" \
+		KCFLAGS="$(kernel-cflags-for-kmake)" \
 		LDFLAGS="" \
 		"V=1" \
 		"$@"

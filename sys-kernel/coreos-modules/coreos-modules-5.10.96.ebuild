@@ -30,6 +30,19 @@ src_compile() {
 
 	# Build both vmlinux and modules (moddep checks symbols in vmlinux)
 	kmake vmlinux modules
+
+	# Installing vastnfs kernel modules
+	mkdir vastnfs
+	cd vastnfs
+	patch -p1 < ${FILESDIR}/vastnfs-package.diff
+	emake K_BUILD="${S}/source" \
+   	      K_OBJ="$(realpath ${S}/source/../build)" \
+	      ARCH="$(tc-arch-kernel)" \
+	      CROSS_COMPILE="${CHOST}-" \
+	      KCFLAGS="$(kernel-cflags-for-kmake)" \
+	      LDFLAGS="" \
+	      "V=1"
+	cd ..
 }
 
 src_install() {
@@ -41,6 +54,19 @@ src_install() {
 		  INSTALL_MOD_STRIP="--strip-unneeded" \
 		  INSTALL_FW_PATH="${T}/fw" \
 		  modules_install
+
+	# Install vastnfs modules
+	local modbase pathname
+        for pathname in $(find vastnfs/bundle -name \*.ko) ; do
+	    echo "Overriding with" ${pathname}
+	    modbase=$(basename ${pathname})
+	    rm -f $(find ${D}/usr -name ${modbase})
+	    mkdir -p ${D}/usr/lib/modules/${KV_FULL}/vastnfs
+	    cp -a ${pathname} ${D}/usr/lib/modules/${KV_FULL}/vastnfs
+        done
+
+	# Running depmod again
+	depmod -b ${D}/usr ${KV_FULL}
 
 	# Install to /usr/lib/debug with debug symbols intact
 	kmake INSTALL_MOD_PATH="${D}/usr/lib/debug/usr" \
