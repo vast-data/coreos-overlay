@@ -1,0 +1,844 @@
+From df75bf1e27d06569176c3bab6b6e0d70a4b65a0f Mon Sep 17 00:00:00 2001
+From: Dan Aloni <dan.aloni@vastdata.com>
+Date: Thu, 24 Feb 2022 21:17:08 +0200
+Subject: [PATCH] gssd: add namespace support with env-provided ccache
+
+---
+ aclocal/libcap-ng.m4   |  36 +++
+ aclocal/libcap.m4      |  36 ++-
+ configure.ac           |   3 +
+ utils/gssd/Makefile.am |   4 +-
+ utils/gssd/gssd.h      |   2 +
+ utils/gssd/gssd_proc.c | 538 +++++++++++++++++++++++++++++++++++++++--
+ 6 files changed, 585 insertions(+), 34 deletions(-)
+ create mode 100644 aclocal/libcap-ng.m4
+
+diff --git a/aclocal/libcap-ng.m4 b/aclocal/libcap-ng.m4
+new file mode 100644
+index 000000000000..884a1c2ef261
+--- /dev/null
++++ b/aclocal/libcap-ng.m4
+@@ -0,0 +1,36 @@
++# libcap-ng.m4 - Checks for the libcap-ng support
++# 	Copyright (c) 2009 Steve Grubb sgrubb@redhat.com
++#
++AC_DEFUN([AC_LIBCAP_NG],
++[
++  AC_ARG_WITH(libcap-ng,
++    [  --with-libcap-ng=[auto/yes/no]  Add Libcap-ng support [default=auto]],,
++    with_libcap_ng=auto)
++  # Check for Libcap-ng API
++  #
++  # libcap-ng detection
++  if test x$with_libcap_ng = xno ; then
++      have_libcap_ng=no;
++  else
++      # Start by checking for header file
++      AC_CHECK_HEADER(cap-ng.h, capng_headers=yes, capng_headers=no)
++      # See if we have libcap-ng library
++      AC_CHECK_LIB(cap-ng, capng_clear,
++	         CAPNG_LDADD=-lcap-ng,)
++      # Check results are usable
++      if test x$with_libcap_ng = xyes -a x$CAPNG_LDADD = x ; then
++         AC_MSG_ERROR(libcap-ng support was requested and the library was not found)
++      fi
++      if test x$CAPNG_LDADD != x -a $capng_headers = no ; then
++         AC_MSG_ERROR(libcap-ng libraries found but headers are missing)
++      fi
++  fi
++  AC_SUBST(CAPNG_LDADD)
++  AC_MSG_CHECKING(whether to use libcap-ng)
++  if test x$CAPNG_LDADD != x ; then
++      AC_DEFINE(HAVE_LIBCAP_NG,1,[libcap-ng support])
++      AC_MSG_RESULT(yes)
++  else
++      AC_MSG_RESULT(no)
++  fi
++])
+diff --git a/aclocal/libcap.m4 b/aclocal/libcap.m4
+index f8a0ed178ccc..be32feb75721 100644
+--- a/aclocal/libcap.m4
++++ b/aclocal/libcap.m4
+@@ -2,22 +2,34 @@ dnl Checks for libcap.so
+ dnl
+ AC_DEFUN([AC_LIBCAP], [
+ 
+-  dnl look for prctl
+-  AC_CHECK_FUNC([prctl], , AC_MSG_ERROR([prctl syscall is not available]))
++  AC_ARG_WITH(libcap,
++    [  --with-libcap    Add libcap support [default=yes, if libcap-ng not available]],,
++    with_libcap=auto)
+ 
+-  AC_ARG_ENABLE([caps],
+-    [AS_HELP_STRING([--disable-caps], [Disable capabilities support])])
++  if test "x$with_libcap" = "xno"; then
++	enable_libcap="no"
++  else
++	dnl look for prctl
++	AC_CHECK_FUNC([prctl], , )
+ 
+-  LIBCAP=
++	dnl look for the library; do not add to LIBS if found
++	AC_CHECK_LIB([cap], [cap_get_proc], enable_libcap="yes", enable_libcap="no", )
+ 
+-  if test "x$enable_caps" != "xno" ; then
+-    dnl look for the library; do not add to LIBS if found
+-    AC_CHECK_LIB([cap], [cap_get_proc], [LIBCAP=-lcap], ,)
+-
+-    AC_CHECK_HEADERS([sys/capability.h], ,
+-      [test "x$enable_caps" = "xyes" && AC_MSG_ERROR([libcap headers not found.])])
++	AC_CHECK_HEADERS([sys/capability.h], ,
++			 [
++				if test x$with_libcap = xyes; then
++					AC_MSG_ERROR([libcap headers not found])
++				else
++					AC_MSG_WARN([libcap headers not found. mount.cifs will be built without support for dropping capabilities. Consider installing libcap-devel.])
++					enable_libcap="no"
++				fi
++			 ])
+   fi
+ 
+-  AC_SUBST(LIBCAP)
++  if test "$enable_libcap" = "yes"; then
++	AC_DEFINE([HAVE_LIBCAP],[1], [Define if libcap exists])
++	LIBCAP=-lcap
++	AC_SUBST(LIBCAP)
++  fi
+ 
+ ])dnl
+diff --git a/configure.ac b/configure.ac
+index 50e9b321dcf3..e23dcda05abd 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -280,6 +280,9 @@ AC_LIBTIRPC
+ dnl Check for -lcap
+ AC_LIBCAP
+ 
++dnl Check for -lcap-ng
++AC_LIBCAP_NG
++
+ dnl Check for -lxml2
+ AC_LIBXML2
+ 
+diff --git a/utils/gssd/Makefile.am b/utils/gssd/Makefile.am
+index 21d3bb8888b8..a77a43e4f539 100644
+--- a/utils/gssd/Makefile.am
++++ b/utils/gssd/Makefile.am
+@@ -52,7 +52,9 @@ gssd_LDADD = \
+ 	$(KRBLIBS) \
+ 	$(GSSAPI_LIBS) \
+ 	$(LIBTIRPC) \
+-	$(LIBPTHREAD)
++	$(LIBPTHREAD) \
++	$(LIBCAP) \
++	$(CAPNG_LDADD)
+ 
+ gssd_LDFLAGS = \
+ 	$(KRBLDFLAGS)
+diff --git a/utils/gssd/gssd.h b/utils/gssd/gssd.h
+index 519dc431b956..90663135c6b0 100644
+--- a/utils/gssd/gssd.h
++++ b/utils/gssd/gssd.h
+@@ -91,6 +91,8 @@ struct clnt_info {
+ struct clnt_upcall_info {
+ 	struct clnt_info 	*clp;
+ 	uid_t			uid;
++	pid_t			pid;
++	bool			has_pid;
+ 	int			fd;
+ 	char			*srchost;
+ 	char			*target;
+diff --git a/utils/gssd/gssd_proc.c b/utils/gssd/gssd_proc.c
+index ae568f157cc5..92aabb6c1233 100644
+--- a/utils/gssd/gssd_proc.c
++++ b/utils/gssd/gssd_proc.c
+@@ -71,6 +71,10 @@
+ #include <sys/wait.h>
+ #include <syscall.h>
+ 
++#ifdef HAVE_LIBCAP_NG
++#include <cap-ng.h>
++#endif
++
+ #include "gssd.h"
+ #include "err_util.h"
+ #include "gss_util.h"
+@@ -156,6 +160,34 @@ parse_enctypes(char *enctypes)
+ 	return 0;
+ }
+ 
++static int
++copy_downcall_info_from_child(
++	char *p, int buf_size, uid_t uid,
++	struct authgss_private_data *pd,
++	gss_buffer_desc *context_token, OM_uint32 *lifetime_rec,
++	gss_buffer_desc *acceptor)
++{
++	char *end = p + buf_size;
++
++	if (get_bytes(&p, end, &uid, sizeof(uid)) < 0)
++		goto out_err;
++	if (get_bytes(&p, end, lifetime_rec, sizeof(*lifetime_rec)) < 0)
++		goto out_err;
++	if (get_bytes(&p, end, &pd->pd_seq_win, sizeof(pd->pd_seq_win)) < 0)
++		goto out_err;
++	if (get_buffer(&p, end, &pd->pd_ctx_hndl))
++		goto out_err;
++	if (get_buffer(&p, end, context_token))
++		goto out_err;
++	if (get_buffer(&p, end, acceptor))
++		goto out_err;
++
++	return 0;
++
++out_err:
++	return -1;
++}
++
+ static void
+ do_downcall(int k5_fd, uid_t uid, struct authgss_private_data *pd,
+ 	    gss_buffer_desc *context_token, OM_uint32 lifetime_rec,
+@@ -451,10 +483,11 @@ create_auth_rpc_client(struct clnt_info *clp,
+  * upcall attempt.
+  */
+ static int
+-change_identity(uid_t uid)
++change_identity(uid_t uid, uid_t *given_gid)
+ {
+ 	struct passwd	*pw;
+ 	int res;
++	uid_t gid;
+ 
+ 	/* drop list of supplimentary groups first */
+ #ifdef __NR_setgroups32
+@@ -466,16 +499,22 @@ change_identity(uid_t uid)
+ 		return errno;
+ 	}
+ 
+-	/* try to get pwent for user */
+-	pw = getpwuid(uid);
+-	if (!pw) {
+-		/* if that doesn't work, try to get one for "nobody" */
+-		errno = 0;
+-		pw = getpwnam("nobody");
++	if (given_gid) {
++		gid = *given_gid;
++	} else {
++		/* try to get pwent for user */
++		pw = getpwuid(uid);
+ 		if (!pw) {
+-			printerr(0, "WARNING: unable to determine gid for uid %u\n", uid);
+-			return errno ? errno : ENOENT;
++			/* if that doesn't work, try to get one for "nobody" */
++			errno = 0;
++			pw = getpwnam("nobody");
++			if (!pw) {
++				printerr(0, "WARNING: unable to determine gid for uid %u\n", uid);
++				return errno ? errno : ENOENT;
++			}
+ 		}
++
++		gid = pw->pw_gid;
+ 	}
+ 
+ 	/* Switch the UIDs and GIDs. */
+@@ -485,12 +524,12 @@ change_identity(uid_t uid)
+ 	 * other threads. To bypass this, we have to call syscall() directly.
+ 	 */
+ #ifdef __NR_setresgid32
+-	res = syscall(SYS_setresgid32, pw->pw_gid, pw->pw_gid, pw->pw_gid);
++	res = syscall(SYS_setresgid32, gid, gid, gid);
+ #else 
+-	res = syscall(SYS_setresgid, pw->pw_gid, pw->pw_gid, pw->pw_gid);
++	res = syscall(SYS_setresgid, gid, gid, gid);
+ #endif
+ 	if (res != 0) {
+-		printerr(0, "WARNING: failed to set gid to %u!\n", pw->pw_gid);
++		printerr(0, "WARNING: failed to set gid to %u!\n", gid);
+ 		return errno;
+ 	}
+ 
+@@ -507,6 +546,378 @@ change_identity(uid_t uid)
+ 	return 0;
+ }
+ 
++#ifdef HAVE_LIBCAP_NG
++static int
++drop_all_capabilities(void)
++{
++	capng_select_t set = CAPNG_SELECT_CAPS;
++
++	capng_clear(CAPNG_SELECT_BOTH);
++	if (capng_have_capability(CAPNG_EFFECTIVE, CAP_SETPCAP)) {
++		set = CAPNG_SELECT_BOTH;
++	}
++	if (capng_apply(set)) {
++		printerr(2, "%s: Unable to apply capability set: %m\n", __func__);
++		return 1;
++	}
++	return 0;
++}
++#else /* HAVE_LIBCAP_NG */
++static int
++drop_all_capabilities(void)
++{
++	return 0;
++}
++#endif /* HAVE_LIBCAP_NG */
++
++static struct namespace_file {
++	int nstype;
++	const char *name;
++	int fd;
++} namespace_files[] = {
++
++#ifdef CLONE_NEWCGROUP
++	{ CLONE_NEWCGROUP, "cgroup", -1 },
++#endif
++
++#ifdef CLONE_NEWIPC
++	{ CLONE_NEWIPC, "ipc", -1 },
++#endif
++
++#ifdef CLONE_NEWUTS
++	{ CLONE_NEWUTS, "uts", -1 },
++#endif
++
++#ifdef CLONE_NEWNET
++	{ CLONE_NEWNET, "net", -1 },
++#endif
++
++#ifdef CLONE_NEWPID
++	{ CLONE_NEWPID, "pid", -1 },
++#endif
++
++#ifdef CLONE_NEWTIME
++	{ CLONE_NEWTIME, "time", -1 },
++#endif
++
++#ifdef CLONE_NEWNS
++	{ CLONE_NEWNS, "mnt", -1 },
++#endif
++
++#ifdef CLONE_NEWUSER
++	{ CLONE_NEWUSER, "user", -1 },
++#endif
++};
++
++#define NS_PATH_FMT    "/proc/%d/ns/%s"
++#define NS_PATH_MAXLEN (6 + 10 + 4 + 6 + 1)
++
++/**
++ * in_same_user_ns - return true if two processes are in the same user
++ *                   namespace.
++ * @pid_a: the pid of the first process
++ * @pid_b: the pid of the second process
++ *
++ * Works by comparing the inode numbers for /proc/<pid>/user.
++ */
++static int
++in_same_user_ns(pid_t pid_a, pid_t pid_b)
++{
++	char path[NS_PATH_MAXLEN];
++	ino_t a_ino, b_ino;
++	struct stat st;
++
++	snprintf(path, sizeof(path), NS_PATH_FMT, pid_a, "user");
++	if (stat(path, &st) != 0)
++		return 0;
++	a_ino = st.st_ino;
++
++	snprintf(path, sizeof(path), NS_PATH_FMT, pid_b, "user");
++	if (stat(path, &st) != 0)
++		return 0;
++	b_ino = st.st_ino;
++
++	return a_ino == b_ino;
++}
++
++/**
++ * switch_to_process_ns - change the namespace to the one for the specified
++ *                        process.
++ * @pid: initiating pid value from the upcall string
++ *
++ * Uses setns() to switch process namespace.
++ * This ensures that we have the same access and configuration as the
++ * process that triggered the lookup.
++ */
++static int
++switch_to_process_ns(pid_t pid)
++{
++	int count = sizeof(namespace_files) / sizeof(struct namespace_file);
++	int n, err = 0;
++	int rc = 0;
++
++	/* First, open all the namespace fds.  We do this first because
++	   the namespace changes might prohibit us from opening them. */
++	for (n = 0; n < count; ++n) {
++		char nspath[NS_PATH_MAXLEN];
++		int ret, fd;
++
++#ifdef CLONE_NEWUSER
++		if (namespace_files[n].nstype == CLONE_NEWUSER
++		    && in_same_user_ns(getpid(), pid)) {
++			/* Switching to the same user namespace is forbidden,
++			   because switching to a user namespace grants all
++			   capabilities in that namespace regardless of uid. */
++			namespace_files[n].fd = -1;
++			continue;
++		}
++#endif
++
++		ret = snprintf(nspath, NS_PATH_MAXLEN, NS_PATH_FMT,
++			       pid, namespace_files[n].name);
++		if (ret >= NS_PATH_MAXLEN) {
++			printerr(2, "%s: unterminated path!\n", __func__);
++			err = ENAMETOOLONG;
++			rc = -1;
++			goto out;
++		}
++
++		fd = open(nspath, O_RDONLY);
++		if (fd < 0 && errno != ENOENT) {
++			/*
++			 * don't stop on non-existing ns
++			 * but stop for other errors
++			 */
++			err = errno;
++			rc = -1;
++			goto out;
++		}
++
++		namespace_files[n].fd = fd;
++	}
++
++	/* Next, call setns for each of them */
++	for (n = 0; n < count; ++n) {
++		/* skip non-existing ns */
++		if (namespace_files[n].fd < 0)
++			continue;
++
++		rc = setns(namespace_files[n].fd, namespace_files[n].nstype);
++
++		if (rc < 0) {
++			printerr(0, "%s: setns() failed for %s\n",
++			       __func__, namespace_files[n].name);
++			err = errno;
++			goto out;
++		}
++	}
++
++out:
++	/* Finally, close all the fds */
++	for (n = 0; n < count; ++n) {
++		if (namespace_files[n].fd != -1) {
++			close(namespace_files[n].fd);
++			namespace_files[n].fd = -1;
++		}
++	}
++
++	if (rc != 0) {
++		errno = err;
++	}
++
++	return rc;
++}
++
++#define	ENV_PATH_FMT			"/proc/%d/environ"
++#define	ENV_PATH_MAXLEN			(6 + 10 + 8 + 1)
++
++#define	ENV_BUF_START			(4096)
++#define	ENV_BUF_MAX			(131072)
++
++/**
++ * get_cachename_from_process_env - scrape value of $KRB5CCNAME out of the
++ * 				    initiating process' environment.
++ * @pid: initiating pid value from the upcall string
++ *
++ * Open the /proc/<pid>/environ file for the given pid, and scrape it for
++ * KRB5CCNAME entries.
++ *
++ * We start with a page-size buffer, and then progressively double it until
++ * we can slurp in the whole thing.
++ *
++ * Note that this is not entirely reliable. If the process is sitting in a
++ * container or something, then this is almost certainly not going to point
++ * where you expect.
++ *
++ * Probably it just won't work, but could a user use this to trick cifs.upcall
++ * into reading a file outside the container, by setting KRB5CCNAME in a
++ * crafty way?
++ */
++static char *
++get_ccache_from_process_env(pid_t pid, const char *envname_prefix)
++{
++	int fd, ret;
++	ssize_t buflen;
++	ssize_t bufsize = ENV_BUF_START;
++	char pathname[ENV_PATH_MAXLEN];
++	char *cachename = NULL;
++	char *buf = NULL, *pos;
++	size_t env_len = strlen(envname_prefix);
++
++	if (!pid) {
++		printerr(2, "%s: pid == 0\n", __func__);
++		return NULL;
++	}
++
++	pathname[ENV_PATH_MAXLEN - 1] = '\0';
++	ret = snprintf(pathname, ENV_PATH_MAXLEN, ENV_PATH_FMT, pid);
++	if (ret >= ENV_PATH_MAXLEN) {
++		printerr(2, "%s: unterminated path!\n", __func__);
++		return NULL;
++	}
++
++	printerr(0, "%s: pathname=%s\n", __func__, pathname);
++
++	fd = open(pathname, O_RDONLY);
++	if (fd < 0) {
++		printerr(2, "%s: open failed: %d\n", __func__, errno);
++		return NULL;
++	}
++retry:
++	if (bufsize > ENV_BUF_MAX) {
++		printerr(2, "%s: buffer too big: %zd\n",
++							__func__, bufsize);
++		goto out_close;
++	}
++
++	buf = malloc(bufsize);
++	if (!buf) {
++		printerr(2, "%s: malloc failure\n", __func__);
++		goto out_close;
++	}
++
++	buflen = read(fd, buf, bufsize);
++	if (buflen < 0) {
++		printerr(2, "%s: read failed: %d\n", __func__, errno);
++		goto out_close;
++	}
++
++	if (buflen >= bufsize) {
++		/* We read to the end of the buffer. Double and try again */
++		printerr(2, "%s: read to end of buffer (%zu bytes)\n",
++					__func__, bufsize);
++		free(buf);
++		bufsize *= 2;
++		if (lseek(fd, 0, SEEK_SET) < 0)
++			goto out_close;
++		goto retry;
++	}
++
++	pos = buf;
++	while (buflen > 0) {
++		size_t len = strnlen(pos, buflen);
++
++		if (len > env_len &&
++		    !memcmp(pos, envname_prefix, env_len)) {
++			cachename = strndup(pos + env_len,
++							len - env_len);
++			printerr(2, "%s: cachename = %s\n",
++				 __func__, cachename);
++			break;
++		}
++		buflen -= (len + 1);
++		pos += (len + 1);
++	}
++
++	if (!cachename)
++		printerr(2, "%s: env %s not found in target process\n",
++			 __func__, envname_prefix);
++
++out_close:
++	free(buf);
++	close(fd);
++	return cachename;
++}
++
++static AUTH *
++krb5_try_get_creds_user_env(struct clnt_info *clp, uid_t uid, uid_t gid,
++			    pid_t pid, char *tgtname, int *downcall_err, int
++			    *chg_err, char *env_ccache, CLIENT **rpc_clnt)
++{
++	AUTH		*auth = NULL; /* This struct is from tirpc */
++	gss_cred_id_t	gss_cred;
++	char		**dname;
++	int		err, resp = -1;
++	u_int		maj_stat, min_stat;
++	pthread_t tid = pthread_self();
++	char		buf[PATH_MAX+5+256+1];
++
++	printerr(2, "krb5_try_get_creds_user_env(0x%lx): uid %d pid %d tgtname %s\n", 
++		 tid, uid, pid, tgtname);
++	printerr(3, "looking for client creds with uid %u for "
++		 "server %s as %s\n", uid, clp->servername, env_ccache);
++
++	maj_stat = gss_krb5_ccache_name(&min_stat, env_ccache, NULL);
++	if (maj_stat == GSS_S_COMPLETE) {
++		printerr(3, "obtained user-provided ccache\n");
++	} else {
++		printerr(0, "ERROR: unable to get user cred cache '%s' "
++			 "failed (%s)\n", buf, error_message(min_stat));
++		printerr(2, "fallback to regular ccache"
++			 " path due to response %d\n", resp);
++	}
++
++	printerr(2, "switching to process %d namespace\n", pid);
++	/*
++	 * Change to the process's namespace. This means that things will work
++	 * acceptably in containers, because we'll be looking at the correct
++	 * filesystem and have the correct network configuration.
++	 */
++	err = switch_to_process_ns(pid);
++	if (err == -1) {
++		printerr(2, "unable to switch to process namespace: %s", strerror(errno));
++		goto out;
++	}
++
++	*chg_err = change_identity(uid, &gid);
++	if (*chg_err) {
++		printerr(0, "WARNING: failed to change identity: %s\n",
++			 strerror(*chg_err));
++		goto out;
++	}
++
++	err = drop_all_capabilities();
++	if (err) {
++		printerr(2, "unable to drop capabilities: %s", strerror(errno));
++		goto out;
++	}
++
++	/** Tell krb5 gss which credentials cache to use.
++	 * Try first to acquire credentials directly via GSSAPI
++	 */
++	err = gssd_acquire_user_cred(&gss_cred);
++	if (err == 0)
++		resp = create_auth_rpc_client(clp, tgtname, rpc_clnt,
++					      &auth, uid,
++					      AUTHTYPE_KRB5, gss_cred);
++
++	/** if create_auth_rplc_client fails try the traditional
++	 * method of trolling for credentials
++	 */
++	for (dname = ccachesearch; resp != 0 && *dname != NULL; dname++) {
++		err = gssd_setup_krb5_user_gss_ccache(uid, clp->servername,
++						*dname);
++		if (err == -EKEYEXPIRED)
++			*downcall_err = -EKEYEXPIRED;
++		else if (err == 0)
++			resp = create_auth_rpc_client(clp, tgtname, rpc_clnt,
++						&auth, uid,AUTHTYPE_KRB5,
++						GSS_C_NO_CREDENTIAL);
++	}
++out:
++	return auth;
++}
++
+ static AUTH *
+ krb5_not_machine_creds(struct clnt_info *clp, uid_t uid, char *tgtname,
+ 			int *downcall_err, int *chg_err, CLIENT **rpc_clnt)
+@@ -520,7 +931,7 @@ krb5_not_machine_creds(struct clnt_info *clp, uid_t uid, char *tgtname,
+ 	printerr(2, "krb5_not_machine_creds(0x%lx): uid %d tgtname %s\n", 
+ 		tid, uid, tgtname);
+ 
+-	*chg_err = change_identity(uid);
++	*chg_err = change_identity(uid, NULL);
+ 	if (*chg_err) {
+ 		printerr(0, "WARNING: failed to change identity: %s",
+ 			strerror(*chg_err));
+@@ -667,6 +1078,8 @@ process_krb5_upcall(struct clnt_upcall_info *info)
+ {
+ 	struct clnt_info	*clp = info->clp;
+ 	uid_t			uid = info->uid;
++	pid_t			pid = info->pid;
++	bool			has_pid = info->has_pid;
+ 	int			fd = info->fd;
+ 	char			*srchost = info->srchost;
+ 	char			*tgtname = info->target;
+@@ -681,12 +1094,61 @@ process_krb5_upcall(struct clnt_upcall_info *info)
+ 	gss_OID			mech;
+ 	gss_buffer_desc		acceptor  = {0};
+ 	struct cleanup_args cleanup_args = {&min_stat, &acceptor, &token, &pd, &auth, &rpc_clnt};
++	bool			in_child = false;
++	int			child_pipe[2];
++	char			*env_ccache = NULL;
++	int			cleanup_execute = 1;
+ 
+ 	token.length = 0;
+ 	token.value = NULL;
+ 	memset(&pd, 0, sizeof(struct authgss_private_data));
+ 
+ 	pthread_cleanup_push(cleanup_handler, &cleanup_args);
++
++	if (has_pid) {
++		int wstatus = 0;
++
++		env_ccache = get_ccache_from_process_env(pid, "KRB5CCNAME=");
++		if (!env_ccache) {
++			printerr(0, "fallback to regular uid cred path\n");
++		} else {
++			int ret = pipe2(child_pipe, O_CLOEXEC);
++			if (ret < 0) {
++				printerr(1, "error creating pipe for child (%d)", errno);
++				goto out_return_error;
++			}
++			printerr(1, "forking child process\n");
++
++			pid_t child_pid = fork();
++			if (child_pid != 0) {
++				char buf[0x1000];
++				int nbytes;
++
++				close(child_pipe[1]);
++				nbytes = read(child_pipe[0], buf, sizeof(buf));
++				pid_t res = waitpid(child_pid, &wstatus, 0);
++				close(child_pipe[0]);
++
++				printerr(1, "done waiting for child process (code=%d), bytes read %d\n", res, nbytes);
++
++				ret = copy_downcall_info_from_child(
++					buf, nbytes, uid,
++					&pd, &token, &lifetime_rec, &acceptor);
++				if (ret < 0) {
++					printerr(1, "error copying child process downcall info\n");
++					goto out_return_error;
++				}
++
++				cleanup_execute = 0;
++				goto do_down_call;
++			} else {
++				close(child_pipe[0]);
++				printerr(1, "execution continues in child\n");
++				in_child = true;
++			}
++		}
++	}
++
+ 	/*
+ 	 * If "service" is specified, then the kernel is indicating that
+ 	 * we must use machine credentials for this request.  (Regardless
+@@ -713,10 +1175,23 @@ process_krb5_upcall(struct clnt_upcall_info *info)
+ 	if (uid != 0 || (uid == 0 && root_uses_machine_creds == 0 &&
+ 				service == NULL)) {
+ 
+-		auth = krb5_not_machine_creds(clp, uid, tgtname, &downcall_err,
+-						&err, &rpc_clnt);
+-		if (err)
++		// TODO: pass gid from kernel space too
++		if (has_pid && env_ccache)
++			auth = krb5_try_get_creds_user_env(
++				  clp, uid, uid, pid, tgtname, &downcall_err,
++				  &err, env_ccache, &rpc_clnt);
++
++		if (has_pid && !auth) {
++			printerr(1, "PREVENTING FALLBACK\n");
+ 			goto out_return_error;
++		}
++
++		if (!auth) {
++			auth = krb5_not_machine_creds(clp, uid, tgtname, &downcall_err,
++						      &err, &rpc_clnt);
++			if (err)
++				goto out_return_error;
++		}
+ 	}
+ 	if (auth == NULL) {
+ 		if (uid == 0 && (root_uses_machine_creds == 1 ||
+@@ -774,11 +1249,18 @@ process_krb5_upcall(struct clnt_upcall_info *info)
+ 	pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+ 	pthread_testcancel();
+ 
+-	do_downcall(fd, uid, &pd, &token, lifetime_rec, &acceptor);
++do_down_call:
++	if (in_child) {
++		do_downcall(child_pipe[1], uid, &pd, &token, lifetime_rec, &acceptor);
++	} else {
++		do_downcall(fd, uid, &pd, &token, lifetime_rec, &acceptor);
++	}
+ 
+ out:
+-	pthread_cleanup_pop(1);
++	pthread_cleanup_pop(cleanup_execute);
+ 
++	if (in_child)
++		exit(0);
+ 	return;
+ 
+ out_return_error:
+@@ -790,7 +1272,7 @@ out_return_error:
+ }
+ 
+ static struct clnt_upcall_info *
+-alloc_upcall_info(struct clnt_info *clp, uid_t uid, int fd, char *srchost,
++alloc_upcall_info(struct clnt_info *clp, uid_t uid, pid_t *pid, int fd, char *srchost,
+ 		  char *target, char *service)
+ {
+ 	struct clnt_upcall_info *info;
+@@ -806,6 +1288,9 @@ alloc_upcall_info(struct clnt_info *clp, uid_t uid, int fd, char *srchost,
+ 	info->clp = clp;
+ 	info->uid = uid;
+ 	info->fd = fd;
++	info->has_pid = pid != NULL;
++	info->pid = pid ? *pid : 0;
++
+ 	if (srchost) {
+ 		info->srchost = strdup(srchost);
+ 		if (info->srchost == NULL)
+@@ -934,7 +1419,7 @@ handle_krb5_upcall(struct clnt_info *clp)
+ 	}
+ 	printerr(2, "\n%s: uid %d (%s)\n", __func__, uid, clp->relpath);
+ 
+-	info = alloc_upcall_info(clp, uid, clp->krb5_fd, NULL, NULL, NULL);
++	info = alloc_upcall_info(clp, uid, NULL, clp->krb5_fd, NULL, NULL, NULL);
+ 	if (info == NULL) {
+ 		printerr(0, "%s: failed to allocate clnt_upcall_info\n", __func__);
+ 		do_error_downcall(clp->krb5_fd, uid, -EACCES);
+@@ -951,11 +1436,13 @@ void
+ handle_gssd_upcall(struct clnt_info *clp)
+ {
+ 	uid_t			uid;
++	pid_t			pid = 0;
+ 	char			lbuf[RPC_CHAN_BUF_SIZE];
+ 	int			lbuflen = 0;
+ 	char			*p;
+ 	char			*mech = NULL;
+ 	char			*uidstr = NULL;
++	char			*pidstr = NULL;
+ 	char			*target = NULL;
+ 	char			*service = NULL;
+ 	char			*srchost = NULL;
+@@ -980,6 +1467,8 @@ handle_gssd_upcall(struct clnt_info *clp)
+ 			mech = p + strlen("mech=");
+ 		else if (!strncmp(p, "uid=", strlen("uid=")))
+ 			uidstr = p + strlen("uid=");
++		else if (!strncmp(p, "pid=", strlen("pid=")))
++			pidstr = p + strlen("pid=");
+ 		else if (!strncmp(p, "enctypes=", strlen("enctypes=")))
+ 			enctypes = p + strlen("enctypes=");
+ 		else if (!strncmp(p, "target=", strlen("target=")))
+@@ -1010,6 +1499,12 @@ handle_gssd_upcall(struct clnt_info *clp)
+ 		return;
+ 	}
+ 
++	if (pidstr) {
++		pid = (pid_t)strtol(pidstr, &p, 10);
++		if (p == pidstr || *p != '\0')
++			pidstr = NULL;
++	}
++
+ 	if (enctypes && parse_enctypes(enctypes) != 0) {
+ 		printerr(0, "WARNING: handle_gssd_upcall: "
+ 			 "parsing encryption types failed: errno %d\n", errno);
+@@ -1039,7 +1534,8 @@ handle_gssd_upcall(struct clnt_info *clp)
+ 	}
+ 
+ 	if (strcmp(mech, "krb5") == 0 && clp->servername) {
+-		info = alloc_upcall_info(clp, uid, clp->gssd_fd, srchost, target, service);
++		info = alloc_upcall_info(clp, uid, pidstr ? &pid : NULL,
++			clp->gssd_fd, srchost, target, service);
+ 		if (info == NULL) {
+ 			printerr(0, "%s: failed to allocate clnt_upcall_info\n", __func__);
+ 			do_error_downcall(clp->gssd_fd, uid, -EACCES);
+-- 
+2.23.0
+

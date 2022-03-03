@@ -11,8 +11,10 @@ HOMEPAGE="http://linux-nfs.org/"
 if [[ "${PV}" = *_rc* ]] ; then
 	inherit versionator
 	MY_PV="$(replace_all_version_separators -)"
+	MY_PV="${MY_PV%-rc}"
 	SRC_URI="http://git.linux-nfs.org/?p=steved/nfs-utils.git;a=snapshot;h=refs/tags/${PN}-${MY_PV};sf=tgz -> ${P}.tar.gz"
 	S="${WORKDIR}/${PN}-${PN}-${MY_PV}"
+	KEYWORDS="alpha amd64 arm arm64 hppa ia64 ~mips ppc ppc64 s390 sh sparc x86"
 else
 	SRC_URI="mirror://sourceforge/nfs/${P}.tar.bz2"
 	KEYWORDS="alpha amd64 arm arm64 hppa ia64 ~mips ppc ppc64 s390 sh sparc x86"
@@ -63,9 +65,7 @@ DEPEND="${DEPEND_COMMON}
 	virtual/pkgconfig"
 
 PATCHES=(
-	"${FILESDIR}"/${PN}-1.1.4-mtab-sym.patch
-	"${FILESDIR}"/${PN}-1.2.8-cross-build.patch
-	"${FILESDIR}"/${P}-svcgssd_undefined_reference.patch #641912
+	"${FILESDIR}"/0001-gssd-add-namespace-support-with-env-provided-ccache.patch
 )
 
 src_prepare() {
